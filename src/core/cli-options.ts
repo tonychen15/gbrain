@@ -29,6 +29,17 @@ export interface CliOptions {
    * the reranker. Has no effect on other commands.
    */
   explain: boolean;
+  /**
+   * HTML output for `gbrain search/query`. Opt-in: when `--html` is passed,
+   * results render as a clean HTML page (score + source-file link +
+   * chunk#/section + matched snippet) written to ~/.gbrain/last-query.html
+   * and opened in the browser. Default `false` — the plain-text formatter
+   * is always used unless the user explicitly asks for HTML, so terminal
+   * use, pipes, redirects, and CI all stay on the text path. `--no-html` is
+   * accepted as the explicit off form (e.g. to override a future alias).
+   * Has no effect on other commands.
+   */
+  html: boolean;
 }
 
 export const DEFAULT_CLI_OPTIONS: CliOptions = {
@@ -37,6 +48,7 @@ export const DEFAULT_CLI_OPTIONS: CliOptions = {
   progressInterval: 1000,
   timeoutMs: null,
   explain: false,
+  html: false,
 };
 
 /**
@@ -112,6 +124,16 @@ export function parseGlobalFlags(argv: string[]): { cliOpts: CliOptions; rest: s
     // v0.40.4 — --explain for `gbrain search/query` per-stage attribution.
     if (a === '--explain') {
       cliOpts.explain = true;
+      continue;
+    }
+    // HTML output for `gbrain search/query` is opt-in: --html turns it on,
+    // --no-html is the explicit off form (default off, set in defaults).
+    if (a === '--html') {
+      cliOpts.html = true;
+      continue;
+    }
+    if (a === '--no-html') {
+      cliOpts.html = false;
       continue;
     }
     rest.push(a);

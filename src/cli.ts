@@ -21,6 +21,7 @@ import { shouldForceExitAfterMain } from './core/cli-force-exit.ts';
 import { serializeMarkdown } from './core/markdown.ts';
 import { parseGlobalFlags, setCliOptions, getCliOptions } from './core/cli-options.ts';
 import type { CliOptions } from './core/cli-options.ts';
+import type { SearchResult } from './core/types.ts';
 import { callRemoteTool, RemoteMcpError, unpackToolResult } from './core/mcp-client.ts';
 import { maybePromptForUpgrade } from './core/thin-client-upgrade-prompt.ts';
 import { VERSION } from './version.ts';
@@ -229,8 +230,7 @@ async function main() {
     // routed path. Date → ISO string; bigint → string (postgres.js shape);
     // Buffer → object. Microsecond-cost; eliminates a whole drift bug class.
     const result = JSON.parse(JSON.stringify(rawResult));
-    const output = formatResult(op.name, result);
-    if (output) process.stdout.write(output);
+    await emitQueryResult(engine, op.name, params, result, cliOpts);
     if (op.name === 'query') {
       const { awaitPendingSearchCacheWrites } = await import('./core/search/hybrid.ts');
       await awaitPendingSearchCacheWrites();
@@ -325,8 +325,9 @@ async function runThinClientRouted(
       signal: sigintController.signal,
     });
     const result = unpackToolResult(raw);
-    const output = formatResult(op.name, result);
-    if (output) process.stdout.write(output);
+    // Thin-client: no local engine, so source_path links are unavailable;
+    // HTML cards fall back to the slug. Pass null for the engine.
+    await emitQueryResult(null, op.name, params, result, cliOpts);
   } catch (e: unknown) {
     if (e instanceof RemoteMcpError) {
       const url = cfg.remote_mcp!.mcp_url;
@@ -613,6 +614,40 @@ async function makeContext(engine: BrainEngine, params: Record<string, unknown>)
     // every transport.
     sourceId: sourceId ?? 'default',
   };
+}
+
+/**
+ * Emit a query/search result set: HTML page (only when the user passes
+ * `--html`) or the plain-text formatter otherwise. Shared by the local-engine
+ * and thin-client call sites so both honor the same opt-in.
+ *
+ * HTML is strictly opt-in: nothing renders a browser page unless `cliOpts.html`
+ * is true, so terminal use, pipes, redirects, --json, and CI all stay on the
+ * text path by default. Empty result sets always take the text path (no browser
+ * tab for "No results"). `engine` is null on the thin-client path (no
+ * source_path lookup available).
+ */
+async function emitQueryResult(
+  engine: BrainEngine | null,
+  opName: string,
+  params: Record<string, unknown>,
+  result: unknown,
+  cliOpts: CliOptions,
+): Promise<void> {
+  const isSearchLike = opName === 'query' || opName === 'search';
+  if (
+    isSearchLike &&
+    cliOpts.html &&
+    Array.isArray(result) &&
+    (result as unknown[]).length > 0
+  ) {
+    const { handleQueryHtml } = await import('./core/search/html-output.ts');
+    const query = typeof params.query === 'string' ? params.query : '';
+    await handleQueryHtml(engine, query, result as SearchResult[]);
+    return;
+  }
+  const output = formatResult(opName, result);
+  if (output) process.stdout.write(output);
 }
 
 function formatResult(opName: string, result: unknown): string {
