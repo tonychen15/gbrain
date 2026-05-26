@@ -18,6 +18,9 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { hybridSearch } from '../../src/core/search/hybrid.ts';
 import {
@@ -29,6 +32,14 @@ import type { PageInput, SearchOpts } from '../../src/core/types.ts';
 import type { RerankInput, RerankResult } from '../../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
+// Isolated GBRAIN_HOME so hybridSearch's v0.36 embedding-column resolver
+// (which reads loadConfig()) sees a config that MATCHES the stubbed gateway
+// dims below — not the developer's real ~/.gbrain/config.json. Without this
+// the resolver can inject a different model+dim (e.g. 3-small@1280), the
+// stubbed 1536-dim embed throws AIConfigError, the vector path swallows it,
+// and search silently drops to keyword-only — skipping the reranker entirely.
+let homeDir: string;
+let prevHome: string | undefined;
 
 const DIMS = 1536; // gateway default embedding dim
 const FAKE_EMB = Array.from({ length: DIMS }, (_, j) => (j === 0 ? 1 : 0.01));
@@ -40,6 +51,19 @@ function stubEmbeddings(): void {
 }
 
 beforeAll(async () => {
+  // Pin config to match the stubbed gateway (3-large @ DIMS) so the
+  // embedding-column resolver agrees with the stub. .serial test → direct
+  // env mutation is allowed; restored in afterAll.
+  prevHome = process.env.GBRAIN_HOME;
+  homeDir = mkdtempSync(join(tmpdir(), 'gbrain-rerank-home-'));
+  mkdirSync(join(homeDir, '.gbrain'), { recursive: true });
+  writeFileSync(
+    join(homeDir, '.gbrain', 'config.json'),
+    JSON.stringify({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: DIMS }),
+    'utf8',
+  );
+  process.env.GBRAIN_HOME = homeDir;
+
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
@@ -85,6 +109,9 @@ afterAll(async () => {
   __setEmbedTransportForTests(null);
   resetGateway();
   await engine.disconnect();
+  if (prevHome === undefined) delete process.env.GBRAIN_HOME;
+  else process.env.GBRAIN_HOME = prevHome;
+  if (homeDir) rmSync(homeDir, { recursive: true, force: true });
 });
 
 describe('hybridSearch — reranker disabled (pass-through)', () => {
