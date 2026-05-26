@@ -6,6 +6,7 @@ import {
   escapeHtml,
   fileUrl,
   renderQueryHtml,
+  renderSnippet,
   type HtmlResultRow,
 } from '../../src/core/search/html-formatter.ts';
 import { bestEffortLine, resolveAbsoluteSourcePath } from '../../src/core/search/html-output.ts';
@@ -119,6 +120,92 @@ describe('renderQueryHtml', () => {
   test('marks stale results', () => {
     const html = renderQueryHtml({ query: 'q', rows: [row({ stale: true })] });
     expect(html).toContain('stale');
+  });
+});
+
+describe('renderSnippet', () => {
+  test('renders a GFM pipe-table as a real <table>, dropping the delimiter row', () => {
+    const md = '| opencode | Claude Code | Notes |\n|---|---|---|\n| `build` | default | Full r/w |';
+    const html = renderSnippet(md);
+    expect(html).toContain('<table class="snip-table">');
+    expect(html).toContain('<th>opencode</th>');
+    expect(html).toContain('<th>Claude Code</th>');
+    expect(html).toContain('<td>default</td>');
+    // The |---|---| delimiter row must NOT survive as literal text.
+    expect(html).not.toContain('---');
+    // No raw pipe-row text left over for the rendered rows.
+    expect(html).not.toContain('| opencode |');
+  });
+
+  test('escapes cell content (XSS-safe inside tables)', () => {
+    const md = '| a | b |\n|---|---|\n| <img src=x onerror=alert(1)> | safe |';
+    const html = renderSnippet(md);
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    expect(html).not.toContain('<img src=x');
+  });
+
+  test('non-table text becomes escaped monospace text, newlines preserved', () => {
+    const html = renderSnippet('first line\nsecond <b>line</b>');
+    expect(html).toContain('<div class="snip-text">');
+    expect(html).toContain('first line\nsecond &lt;b&gt;line&lt;/b&gt;');
+    expect(html).not.toContain('<table');
+  });
+
+  test('mixes prose and a table (prose before/after the table)', () => {
+    const md = 'intro paragraph\n| x | y |\n|---|---|\n| 1 | 2 |\ntrailing note';
+    const html = renderSnippet(md);
+    expect(html).toContain('intro paragraph');
+    expect(html).toContain('<table class="snip-table">');
+    expect(html).toContain('<td>1</td>');
+    expect(html).toContain('trailing note');
+  });
+
+  test('rows with extra/missing cells are padded/truncated to header width', () => {
+    const md = '| a | b |\n|---|---|\n| only-one |\n| 1 | 2 | 3 |';
+    const html = renderSnippet(md);
+    // First body row padded to 2 cells; second truncated to 2.
+    expect(html).toContain('<td>only-one</td><td></td>');
+    expect(html).toContain('<td>1</td><td>2</td></tr>');
+    expect(html).not.toContain('<td>3</td>');
+  });
+
+  test('empty input renders nothing', () => {
+    expect(renderSnippet('')).toBe('');
+  });
+
+  test('escaped pipe in a cell stays one cell (GFM \\| -> |)', () => {
+    const md = '| pattern | note |\n|---|---|\n| `a\\|b` | alternation |';
+    const html = renderSnippet(md);
+    // The cell keeps the literal pipe and is NOT split into an extra <td>.
+    expect(html).toContain('<td>`a|b`</td>');
+    expect(html).toContain('<td>alternation</td>');
+  });
+
+  test('single-column table renders (header >= 1 cell)', () => {
+    const md = '| Steps |\n|---|\n| first |\n| second |';
+    const html = renderSnippet(md);
+    expect(html).toContain('<table class="snip-table">');
+    expect(html).toContain('<th>Steps</th>');
+    expect(html).toContain('<td>first</td>');
+    expect(html).toContain('<td>second</td>');
+  });
+
+  test('orphan delimiter (chunk starts mid-table): drop it, render following rows headerless', () => {
+    // No header row precedes the delimiter (header was in a prior chunk).
+    const md = 'tail of prior text\n|---------|----------|\n| 1 | 2 |\n| 3 | 4 |';
+    const html = renderSnippet(md);
+    expect(html).toContain('tail of prior text');
+    expect(html).not.toContain('---'); // delimiter line dropped, not leaked as text
+    expect(html).toContain('<table class="snip-table">');
+    expect(html).not.toContain('<thead>'); // headerless
+    expect(html).toContain('<td>1</td><td>2</td>');
+  });
+
+  test('lone orphan delimiter with no following rows is dropped entirely', () => {
+    const html = renderSnippet('some text\n|---|---|');
+    expect(html).toContain('some text');
+    expect(html).not.toContain('---');
+    expect(html).not.toContain('<table');
   });
 });
 
