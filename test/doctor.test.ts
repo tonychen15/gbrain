@@ -786,3 +786,59 @@ describe('v0.40.4 — graph_signals_coverage check', () => {
     expect(source).toContain("progress.heartbeat('graph_signals_coverage')");
   });
 });
+
+describe('embed_failure_audit check', () => {
+  const { withEnv } = require('./helpers/with-env.ts');
+  const { checkEmbedFailureAudit } = require('../src/commands/doctor.ts');
+  const { logEmbedFailure, hashQuery } = require('../src/core/search/embed-failure-audit.ts');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const os = require('node:os');
+
+  async function withFreshAuditDir(body: () => Promise<void>): Promise<void> {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-doctor-embedfail-'));
+    try {
+      await withEnv({ GBRAIN_AUDIT_DIR: tmpDir }, async () => {
+        await body();
+      });
+    } finally {
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  test('no embed failures in window → ok', async () => {
+    await withFreshAuditDir(async () => {
+      const check = await checkEmbedFailureAudit();
+      expect(check.name).toBe('embed_failure_audit');
+      expect(check.status).toBe('ok');
+    });
+  });
+
+  test('recent embed failure → warn with fix hint', async () => {
+    await withFreshAuditDir(async () => {
+      logEmbedFailure({
+        query_hash: hashQuery('q'),
+        modality: 'text',
+        model: 'openai:text-embedding-3-small',
+        dimensions: 1280,
+        error_summary: 'Embedding dim mismatch: returned 1536 but schema expects 1280',
+      });
+      const check = await checkEmbedFailureAudit();
+      expect(check.status).toBe('warn');
+      expect(check.message).toContain('keyword-only');
+      expect(check.message).toContain('gbrain models doctor');
+      // Enriched with the latest failure's model@dims.
+      expect(check.message).toContain('text-embedding-3-small');
+      expect(check.message).toContain('1280d');
+    });
+  });
+
+  test('check is wired into runDoctor (source-grep)', async () => {
+    const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
+    expect(source).toMatch(/await checkEmbedFailureAudit\(\)/);
+  });
+});

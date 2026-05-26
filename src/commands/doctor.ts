@@ -605,6 +605,13 @@ export async function doctorReportRemote(engine: BrainEngine): Promise<DoctorRep
   // things when reranker is on vs off.
   checks.push(await checkRerankerHealth(engine));
 
+  // 9-embed. embed_failure_audit: surfaces embed/vector failures from
+  // ~/.gbrain/audit/embed-failures-*.jsonl. When hybridSearch can't embed the
+  // query (config<->stored-data dim mismatch, down provider), it fails open to
+  // keyword-only — silently before, now logged. Warns when any failures land
+  // in the last 7 days so a degraded-to-keyword-only brain is visible.
+  checks.push(await checkEmbedFailureAudit());
+
   // 9a. v0.40.4 graph_signals_coverage: when graph_signals is enabled
   // (via mode bundle default or explicit config override), surface
   // whether link density is high enough for the signal to fire
@@ -1045,6 +1052,55 @@ export async function checkRerankerHealth(engine: BrainEngine): Promise<Check> {
       name: 'reranker_health',
       status: 'warn',
       message: `Could not check reranker audit: ${msg}`,
+    };
+  }
+}
+
+/**
+ * embed_failure_audit doctor check.
+ *
+ * Walks the last 7 days of `~/.gbrain/audit/embed-failures-*.jsonl`. Those rows
+ * are written when `hybridSearch` can't embed the query (config<->stored-data
+ * embedding-dimension mismatch, unconfigured/down provider) and falls back to
+ * keyword-only retrieval. The fallback keeps search working, but it silently
+ * halves quality — so ANY failure in the window warns, with a pointer at the
+ * most likely cause. File-based; no engine needed.
+ */
+export async function checkEmbedFailureAudit(): Promise<Check> {
+  try {
+    const { readRecentEmbedFailures } = await import('../core/search/embed-failure-audit.ts');
+    const failures = readRecentEmbedFailures(7);
+    if (failures.length === 0) {
+      return {
+        name: 'embed_failure_audit',
+        status: 'ok',
+        message: 'No embed/vector failures in last 7 days',
+      };
+    }
+    // Surface the most recent failure's model@dims — the originating bug class
+    // is a config<->stored-data dimension mismatch, so this is the actionable bit.
+    const latest = failures[failures.length - 1];
+    const detail =
+      latest && (latest.model || typeof latest.dimensions === 'number')
+        ? ` Latest: ${latest.model ?? 'default model'}${
+            typeof latest.dimensions === 'number' ? ` @ ${latest.dimensions}d` : ''
+          }.`
+        : '';
+    return {
+      name: 'embed_failure_audit',
+      status: 'warn',
+      message:
+        `${failures.length} embed/vector failure(s) in last 7 days — search fell back to ` +
+        `keyword-only (degraded quality).${detail} Likely a config<->data embedding-dimension ` +
+        `mismatch or a down provider. Fix: run \`gbrain models doctor\` and verify embedding_model ` +
+        `/ embedding_dimensions match your stored vectors.`,
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      name: 'embed_failure_audit',
+      status: 'warn',
+      message: `Could not check embed-failure audit: ${msg}`,
     };
   }
 }
@@ -5062,6 +5118,9 @@ export async function buildChecks(
     // v0.35.0.0+ reranker_health — read JSONL audit; warn on auth or volume.
     progress.heartbeat('reranker_health');
     checks.push(await checkRerankerHealth(engine));
+    // embed_failure_audit — embed/vector failures that fell back to keyword-only.
+    progress.heartbeat('embed_failure_audit');
+    checks.push(await checkEmbedFailureAudit());
     // v0.40.4 graph_signals_coverage — global inbound-link density when
     // graph_signals is enabled in the active mode bundle.
     progress.heartbeat('graph_signals_coverage');

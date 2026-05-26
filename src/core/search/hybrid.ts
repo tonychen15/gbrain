@@ -17,6 +17,7 @@ import { resolveEmbeddingColumn, isCacheSafe } from './embedding-column.ts';
 import { loadConfigWithEngine } from '../config.ts';
 import { dedupResults } from './dedup.ts';
 import { applyReranker } from './rerank.ts';
+import { logEmbedFailure, hashQuery } from './embed-failure-audit.ts';
 import { autoDetectDetail, classifyQuery, isAmbiguousModalityQuery } from './query-intent.ts';
 import { expandAnchors, hydrateChunks } from './two-pass.ts';
 import { enforceTokenBudget } from './token-budget.ts';
@@ -791,8 +792,20 @@ export async function hybridSearch(
       if (effectiveModality === 'both' && imageVectorList !== null) {
         vectorLists = [...vectorLists, imageVectorList];
       }
-    } catch {
-      // Embedding failure is non-fatal, fall back to keyword-only
+    } catch (err) {
+      // Embedding failure is non-fatal — fall back to keyword-only. Log it
+      // (instead of swallowing) so a real config/dim mismatch or a down
+      // embedding provider is visible via `gbrain doctor embed_failure_audit`
+      // instead of silently degrading every query to keyword-only retrieval.
+      // Fail-open behavior is unchanged; this only adds an audit row.
+      logEmbedFailure({
+        query_hash: hashQuery(query),
+        modality:
+          effectiveModality === 'both' ? 'both' : effectiveModality === 'image' ? 'image' : 'text',
+        model: resolvedCol.embeddingModel || undefined,
+        dimensions: resolvedCol.dimensions,
+        error_summary: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
